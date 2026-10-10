@@ -1,33 +1,20 @@
 package us.ajg0702.parkour;
 
 import org.bukkit.Location;
+import org.jspecify.annotations.Nullable;
 import us.ajg0702.parkour.game.PkArea;
 
-public class Portal {
-	
-	String name;
-	
-	Location loc;
-	PkArea area;
-	
-	public Portal(String name, Location loc, PkArea a) {
-		this.loc = loc;
-		this.area = a;
-		this.name = name;
-	}
-	
-	
+public record Portal(String name, Location loc, @Nullable PkArea area) {
+
 	public Location getLoc() {
 		return loc;
 	}
-	
-	
-	public PkArea getArea() {
+
+	public @Nullable PkArea getArea() {
 		return area;
 	}
-	
+
 	public String getName() {
 		return name;
 	}
-
 }

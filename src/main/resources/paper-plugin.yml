@@ -1,0 +1,24 @@
+name: ajParkour
+version: "@VERSION@"
+authors:
+  - ajgeiss0702
+  - Gianluca
+description: Randomly generated parkour!
+website: https://www.spigotmc.org/resources/ajparkour.60909/
+main: us.ajg0702.parkour.Main
+api-version: "@API_VERSION@"
+folia-supported: true
+dependencies:
+  server:
+    PlaceholderAPI:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    WorldEdit:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    InfiniteJump:
+      load: BEFORE
+      required: false
+      join-classpath: true

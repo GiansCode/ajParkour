@@ -1,25 +1,40 @@
 package us.ajg0702.parkour.game;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityPotionEffectEvent;
 import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
-import org.bukkit.event.player.*;
+import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.potion.PotionEffect;
+import org.jspecify.annotations.Nullable;
 import us.ajg0702.parkour.Main;
 import us.ajg0702.parkour.Messages;
+import us.ajg0702.parkour.Portal;
 import us.ajg0702.parkour.api.events.PrePlayerStartParkourEvent;
-import us.ajg0702.parkour.top.TopManager;
+import us.ajg0702.parkour.utils.Tasks;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.logging.Level;
 
 /**
  * A class for managing all players in the parkour.
@@ -31,29 +46,22 @@ public class Manager implements Listener {
 
 	static Manager instance = null;
 
-	List<PkPlayer> plys = new ArrayList<>();
+	private final Map<UUID, PkPlayer> plys = new ConcurrentHashMap<>();
+	private final Map<String, Integer> areaCounts = new ConcurrentHashMap<>();
 
-	List<PkArea> areas = new ArrayList<>();
+	final Main main;
+	final Messages msgs;
 
-	Main main;
-
-	Messages msgs;
+	public volatile boolean pluginDisabling = false;
 
 	public Manager(Main pl) {
 		instance = this;
 		main = pl;
-
 		msgs = main.msgs;
+	}
 
-		Bukkit.getScheduler().scheduleSyncDelayedTask(pl, this::reloadPositions, 5);
-		Bukkit.getScheduler().scheduleSyncRepeatingTask(main, this::checkActive, 15*20, 60*20);
-		Bukkit.getScheduler().runTaskTimer(pl, () -> {
-			if(main.config.getBoolean("debug")) {
-				for(PkArea a : getAreas()) {
-					a.draw();
-				}
-			}
-		}, 10, 20);
+	public void start() {
+		Tasks.globalTimer(this::drawDebugOutlines, 10, 20);
 	}
 
 	/**
@@ -64,13 +72,25 @@ public class Manager implements Listener {
 		return instance;
 	}
 
+	private void drawDebugOutlines() {
+		if(!main.settings().debug()) return;
+		List<PkArea> areas = getAreas();
+		if(areas.isEmpty()) return;
+		for(Player p : Bukkit.getOnlinePlayers()) {
+			Tasks.entity(p, () -> {
+				for(PkArea a : areas) {
+					if(a.getWorld() == p.getWorld()) a.draw(p);
+				}
+			});
+		}
+	}
 
 	/**
 	 * Gets all (loaded) arenas
 	 * @return A list of PkAreas
 	 */
 	public List<PkArea> getAreas() {
-		return areas;
+		return main.areaStorage.getAreas();
 	}
 
 	/**
@@ -78,7 +98,6 @@ public class Manager implements Listener {
 	 */
 	public void reloadPositions() {
 		main.areaStorage.reload();
-		areas = main.areaStorage.getAreas();
 	}
 
 	/**
@@ -86,14 +105,8 @@ public class Manager implements Listener {
 	 * @param name A String with the name of the area.
 	 * @return The found {@link us.ajg0702.parkour.game.PkArea PkArea}. Null if none is found.
 	 */
-	public PkArea getArea(String name) {
-		PkArea f = null;
-		for(PkArea a : areas) {
-			if(a.getName().equalsIgnoreCase(name)) {
-				f = a;
-			}
-		}
-		return f;
+	public @Nullable PkArea getArea(String name) {
+		return main.areaStorage.getArea(name);
 	}
 
 	/**
@@ -101,14 +114,12 @@ public class Manager implements Listener {
 	 * @param ply The {@link org.bukkit.entity.Player Player} to find.
 	 * @return The found PkPlayer. Null if none is found.
 	 */
-	public PkPlayer getPlayer(Player ply) {
-		PkPlayer f = null;
-		for(PkPlayer p : plys) {
-			if(p.ply.equals(ply)) {
-				f = p;
-			}
-		}
-		return f;
+	public @Nullable PkPlayer getPlayer(@Nullable Player ply) {
+		return ply == null ? null : plys.get(ply.getUniqueId());
+	}
+
+	public @Nullable PkPlayer getPlayer(UUID uuid) {
+		return plys.get(uuid);
 	}
 
 	/**
@@ -116,7 +127,7 @@ public class Manager implements Listener {
 	 * @return A {@link java.util.List List} of {@link us.ajg0702.parkour.game.PkPlayer PkPlayer}s.
 	 */
 	public List<PkPlayer> getPlayers() {
-		return plys;
+		return List.copyOf(plys.values());
 	}
 
 	/**
@@ -125,7 +136,7 @@ public class Manager implements Listener {
 	 * @return A boolean telling if the player is in parkour.
 	 */
 	public boolean inParkour(Player ply) {
-		return this.getPlayer(ply) != null;
+		return plys.containsKey(ply.getUniqueId());
 	}
 
 	/**
@@ -135,12 +146,19 @@ public class Manager implements Listener {
 	 */
 	public List<PkPlayer> getPlayersInArea(PkArea area) {
 		List<PkPlayer> f = new ArrayList<>();
-		for(PkPlayer p : plys) {
-			if(p.area.equals(area)) {
-				f.add(p);
-			}
+		for(PkPlayer p : plys.values()) {
+			if(p.getArea().equals(area)) f.add(p);
 		}
 		return f;
+	}
+
+	List<List<BlockPos>> otherJumpSnapshots(PkPlayer self) {
+		if(areaCounts.getOrDefault(self.getArea().getName(), 0) <= 1) return List.of();
+		List<List<BlockPos>> out = new ArrayList<>();
+		for(PkPlayer p : plys.values()) {
+			if(p != self && p.getArea().equals(self.getArea())) out.add(p.jumpSnapshot());
+		}
+		return out;
 	}
 
 	/**
@@ -151,8 +169,6 @@ public class Manager implements Listener {
 		return plys.size();
 	}
 
-
-
 	/**
 	 * Kick a player from parkour.
 	 * @param ply The {@link org.bukkit.entity.Player Player} to kick.
@@ -160,12 +176,9 @@ public class Manager implements Listener {
 	 */
 	public boolean kickPlayer(Player ply) {
 		PkPlayer f = getPlayer(ply);
-		if(f == null) {
-			return false;
-		} else {
-			f.end();
-			return true;
-		}
+		if(f == null) return false;
+		f.end();
+		return true;
 	}
 
 	/**
@@ -177,63 +190,66 @@ public class Manager implements Listener {
 	}
 
 	/**
-	 * Start parkour for a player in a certain area.
+	 * Start parkour for a player in a certain area. Safe to call from any thread.
 	 * @param ply The {@link org.bukkit.entity.Player Player} to start parkour on.
 	 * @param area The {@link us.ajg0702.parkour.game.PkArea PkArea} to start the parkour in.
 	 */
-	public void startGame(Player ply, PkArea area) {
-		if(areas.size() <= 0) {
-			return;
-		}
+	public void startGame(Player ply, @Nullable PkArea area) {
+		Tasks.entity(ply, () -> startNow(ply, area));
+	}
 
-		if(getPlayer(ply) != null) {
-			return;
-		}
+	private void startNow(Player ply, @Nullable PkArea area) {
+		if(pluginDisabling || !ply.isOnline()) return;
+		List<PkArea> areas = getAreas();
+		if(areas.isEmpty()) return;
+		if(plys.containsKey(ply.getUniqueId())) return;
 
-		String fm = main.getAConfig().getString("area-selection");
-		PkArea s = area;
-		if(area == null) {
-			if(fm.equalsIgnoreCase("lowest")) {
-				HashMap<Object, Double> ac = new HashMap<>();
-				for(PkArea p : areas) {
-					int c = getPlayerCounts(p);
-					ac.put(p, (double)c);
-				}
-				LinkedHashMap<Object, Double> acs = main.sortByValueWithObjectKey(ac);
-				s = (PkArea) acs.keySet().toArray()[ac.keySet().size()-1];
-			} else {
-				Bukkit.getLogger().warning("[ajParkour] area-selection in config was not set correctly! Will only use first parkour area.");
-				s = areas.get(0);
-			}
-		}
-		if(s == null) {
-			Bukkit.getLogger().warning("[ajParkour] Something went wrong when selecting which area to use! Selecting first one.");
-			s = areas.get(0);
-		}
+		PkArea s = area != null ? area : selectArea(areas);
 		if(getPlayerCounts(s) >= s.getMax()) {
-			ply.sendMessage(msgs.get("areafull"));
+			ply.sendMessage(msgs.get("areafull", ply));
 			return;
 		}
-		//ply.sendMessage("Starting game in area '" + s.getName()+"'");
 		if(ply.getFoodLevel() <= 6) {
 			ply.setFoodLevel(7);
 		}
 
 		PrePlayerStartParkourEvent preevent = new PrePlayerStartParkourEvent(ply);
 		Bukkit.getPluginManager().callEvent(preevent);
-		if(preevent.isCancelled()) {
-			return;
-		}
+		if(preevent.isCancelled()) return;
 
-		PkPlayer p = new PkPlayer(ply, Manager.getInstance(), s);
-		plys.add(p);
+		PkPlayer p = new PkPlayer(ply, this, s);
+		if(plys.putIfAbsent(ply.getUniqueId(), p) != null) return;
+		areaCounts.merge(s.getName(), 1, Integer::sum);
+		p.begin();
+	}
+
+	private PkArea selectArea(List<PkArea> areas) {
+		if(!main.settings().areaSelectionLowest() || areas.size() == 1) {
+			return areas.getFirst();
+		}
+		int lowest = Integer.MAX_VALUE;
+		List<PkArea> best = new ArrayList<>();
+		for(PkArea a : areas) {
+			int c = areaCounts.getOrDefault(a.getName(), 0);
+			if(c < lowest) {
+				lowest = c;
+				best.clear();
+			}
+			if(c == lowest) best.add(a);
+		}
+		return best.get(ThreadLocalRandom.current().nextInt(best.size()));
 	}
 
 	/**
-	 * Checks that all players are still in parkour. If they are not, they are removed from the list of player in parkour
+	 * Removes players that are no longer in parkour.
 	 */
 	public void checkActive() {
-		plys.removeIf(p -> !p.active);
+		plys.values().removeIf(p -> !p.isActive());
+	}
+
+	void remove(PkPlayer p) {
+		if(!plys.remove(p.getPlayer().getUniqueId(), p)) return;
+		areaCounts.computeIfPresent(p.getArea().getName(), (_, v) -> v <= 1 ? null : v - 1);
 	}
 
 	/**
@@ -242,126 +258,137 @@ public class Manager implements Listener {
 	 * @return The number of people in that area.
 	 */
 	public int getPlayerCounts(PkArea a) {
-		int f = 0;
-		for(PkPlayer p : plys) {
-			if(p.area.equals(a)) {
-				f++;
-			}
-		}
-		return f;
+		return areaCounts.getOrDefault(a.getName(), 0);
 	}
-
-	public boolean pluginDisabling = false;
 
 	/**
 	 * Function called when plugin is getting disabled. It kicks all players from the parkour.
 	 */
 	public void disable() {
+		if(plys.isEmpty()) return;
 		main.getLogger().info("Removing all active players from parkour because the plugin is disabling.");
 		pluginDisabling = true;
-		for(PkPlayer p : plys) {
-			p.end();
+		for(PkPlayer p : List.copyOf(plys.values())) {
+			try {
+				p.end();
+			} catch(Exception e) {
+				main.getLogger().log(Level.WARNING, "Unable to cleanly remove " + p.getPlayer().getName() + " from parkour"
+						+ " (their inventory will be restored when they rejoin):", e);
+			}
 		}
 	}
 
-	@EventHandler
-	public void onDrop(PlayerDropItemEvent e) {
-		Player p = e.getPlayer();
-		if(getPlayer(p) == null) return;
-		e.setCancelled(true);
+	// ------------------------------------------------------------------ listeners
+
+	@EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+	public void onPlayerMove(PlayerMoveEvent e) {
+		PkPlayer p = plys.get(e.getPlayer().getUniqueId());
+		if(p != null) {
+			p.onMove(e);
+			return;
+		}
+		if(!e.hasChangedBlock() || !main.settings().enablePortals() || !main.areaStorage.hasPortals()) return;
+		Portal portal = main.areaStorage.portalAt(e.getTo());
+		if(portal != null) {
+			startGame(e.getPlayer(), portal.getArea());
+		}
+	}
+
+	@EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+	public void onPlayerTeleport(PlayerTeleportEvent e) {
+		PkPlayer p = plys.get(e.getPlayer().getUniqueId());
+		if(p == null || !p.isPlaying() || p.teleporting) return;
+		Location from = e.getFrom();
+		Location to = e.getTo();
+		if(from.getWorld() != to.getWorld() || from.distanceSquared(to) > 100) {
+			p.end(msgs.get("fall.force.reasons.teleport"));
+		}
+	}
+
+	@EventHandler(priority = EventPriority.MONITOR)
+	public void onPreLogin(AsyncPlayerPreLoginEvent e) {
+		if(e.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) return;
+		main.scores.loadBlocking(e.getUniqueId(), e.getName());
 	}
 
 	@EventHandler
+	public void onJoin(PlayerJoinEvent e) {
+		Player p = e.getPlayer();
+		if(main.scores.getCached(p.getUniqueId()) == null) {
+			main.scores.load(p.getUniqueId(), p.getName());
+		}
+		main.inventories.recover(p);
+	}
+
+	@EventHandler(priority = EventPriority.MONITOR)
+	public void onPlayerLeave(PlayerQuitEvent e) {
+		Player p = e.getPlayer();
+		kickPlayer(p);
+		main.scores.unload(p.getUniqueId());
+	}
+
+	@EventHandler(ignoreCancelled = true)
+	public void onDrop(PlayerDropItemEvent e) {
+		if(inParkour(e.getPlayer())) e.setCancelled(true);
+	}
+
+	@EventHandler(ignoreCancelled = true)
 	public void onInvClick(InventoryClickEvent e) {
-		Player p = (Player) e.getWhoClicked();
-		if(getPlayer(p) == null) return;
-		e.setCancelled(true);
+		if(e.getWhoClicked() instanceof Player p && inParkour(p)) e.setCancelled(true);
 	}
 
 	@EventHandler
 	public void onInteract(PlayerInteractEvent e) {
 		Player p = e.getPlayer();
-		if(getPlayer(p) == null) return;
-		if(e.getMaterial().equals(Material.CHEST) && main.config.getBoolean("parkour-inventory")) {
+		if(!inParkour(p)) return;
+		if(e.getMaterial() == Material.CHEST && main.settings().parkourInventory()) {
 			main.selector.openSelector(p);
 			e.setCancelled(true);
 		}
 	}
 
-	@EventHandler
-	public void onPlayerTeleport(PlayerTeleportEvent e) {
-		PkPlayer p = getPlayer(e.getPlayer());
-		if(p != null) {
-			if(!p.teleporting) {
-				World w1 = e.getFrom().getWorld();
-				World w2 = e.getTo().getWorld();
-				if(w1.equals(w2)) {
-					if(e.getFrom().distance(e.getTo()) > 10) {
-						p.end(msgs.get("fall.force.reasons.teleport"));
-					}
-				} else {
-					p.end(msgs.get("fall.force.reasons.teleport"));
-				}
-			}
-		}
-	}
-	@EventHandler
-	public void onPlayerMove(PlayerMoveEvent e) {
-		PkPlayer p = getPlayer(e.getPlayer());
-		if(p == null) return;
-		if(!p.checkMadeIt()) p.checkFall();
-	}
-	@EventHandler
-	public void onPlayerLeave(PlayerQuitEvent e) {
-		kickPlayer(e.getPlayer());
-		TopManager.getInstance().clearPlayerCache(e.getPlayer());
-	}
-
-	@EventHandler
+	@EventHandler(ignoreCancelled = true)
 	public void onBlockPlace(BlockPlaceEvent e) {
 		Player p = e.getPlayer();
-		if(p == null) return;
-
-		if(getPlayer(p) != null) {
+		if(inParkour(p)) {
 			e.setCancelled(true);
 			p.sendMessage(msgs.get("block.place", p));
 		}
 	}
-	@EventHandler
+
+	@EventHandler(ignoreCancelled = true)
 	public void onEmptyBucket(PlayerBucketEmptyEvent e) {
 		Player p = e.getPlayer();
-		if(p == null) return;
-
-		if(getPlayer(p) != null) {
+		if(inParkour(p)) {
 			e.setCancelled(true);
 			p.sendMessage(msgs.get("block.place", p));
 		}
 	}
-	@EventHandler
+
+	@EventHandler(ignoreCancelled = true)
 	public void onBlockBreak(BlockBreakEvent e) {
 		Player p = e.getPlayer();
-		if(p == null) return;
-
-		if(getPlayer(p) != null) {
+		if(inParkour(p)) {
 			e.setCancelled(true);
-			p.sendMessage(msgs.get("block.break"));
+			p.sendMessage(msgs.get("block.break", p));
 		}
 	}
-	@EventHandler
+
+	@EventHandler(ignoreCancelled = true)
 	public void onHungerDeplete(FoodLevelChangeEvent e) {
-		Player p = (Player) e.getEntity();
-		if(getPlayer(p) == null) return;
+		if(!(e.getEntity() instanceof Player p) || !inParkour(p)) return;
 		if(e.getFoodLevel() <= 6) {
 			e.setCancelled(true);
 			p.setFoodLevel(7);
 		}
 	}
 
-	@EventHandler
-	public void onJoin(PlayerJoinEvent e) {
-		main.scores.updateName(e.getPlayer());
+	@EventHandler(ignoreCancelled = true)
+	public void onPotion(EntityPotionEffectEvent e) {
+		if(!(e.getEntity() instanceof Player p) || !inParkour(p)) return;
+		PotionEffect effect = e.getNewEffect();
+		if(effect != null && PkPlayer.isDisallowedPotion(effect.getType())) {
+			e.setCancelled(true);
+		}
 	}
-
-
-
 }

@@ -1,148 +1,100 @@
 package us.ajg0702.parkour.game;
 
-import java.util.*;
-
+import io.papermc.paper.datacomponent.item.ResolvableProfile;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.OfflinePlayer;
 import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.block.Skull;
-import org.bukkit.metadata.FixedMetadataValue;
-
+import org.bukkit.block.data.BlockData;
+import org.jspecify.annotations.Nullable;
 import us.ajg0702.parkour.Main;
-import us.ajg0702.parkour.utils.MaterialParser;
+import us.ajg0702.parkour.utils.Tasks;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class PkJump {
-	
-	PkPlayer ply;
-	Manager man;
-	
-	Main main;
-	
-	List<Location> blocks;
-	
-	boolean placed = false;
+
+	private static final float[] DIRS = {0f, 90f, 180f, -180f, -90f};
+	private static final int[] AIR_DY = {0, 1, -1, 2, -2, 3};
+	private static final BlockData AIR = Material.AIR.createBlockData();
+	private static final Collection<List<BlockPos>> NO_OTHERS = List.of();
+
+	private final PkPlayer ply;
+	private final World world;
+	private final BlockPos pos;
+	private volatile boolean placed = false;
+
+	PkJump(PkPlayer ply, World world, BlockPos pos) {
+		this.ply = ply;
+		this.world = world;
+		this.pos = pos;
+	}
 
 	/**
-	 * Creating a jump for the player. Will calculate best possible direction to place the block.
-	 * @param ply A {@link us.ajg0702.parkour.game.PkPlayer PkPlayer} that the block belongs to
-	 * @param from The 'from' location of the previous jump
+	 * Picks the best position for the next jump.
+	 * @param from the 'from' position of the previous jump
+	 * @param existing the jumps already generated for this player (oldest first)
+	 * @param others snapshots of the jump positions of other players in the same area
 	 */
-	public PkJump(PkPlayer ply, Location from) {
-		man = ply.man;
-		this.ply = ply;
-		this.main = man.main;
-		
-		World w = from.getWorld();
-		int x = from.getBlockX();
-		int y = from.getBlockY();
-		int z = from.getBlockZ();
-		
-		List<Location> bks = new ArrayList<>();
+	static PkJump generate(PkPlayer ply, World world, BlockPos from, float yaw, List<PkJump> existing, Collection<List<BlockPos>> others) {
+		Difficulty d = JumpManager.getInstance().resolve(ply.getArea().getDifficulty(), ply.getScore());
 
+		int r = Main.random(d.getMin(), d.getMax());
 		int maxy = 1;
-		
-		Difficulty d = ply.getArea().getDifficulty();
+		if(r > 4) maxy = 0;
+		if(r >= 5) r = 5;
 
-		JumpManager jm = JumpManager.getInstance();
-		
-		if(d.equals(Difficulty.BALANCED)) {
-			d = Difficulty.EASY;
-			if(ply.getScore() >= jm.getBalancedStart(Difficulty.MEDIUM)) {
-				d = Difficulty.MEDIUM;
-			}
-			if(ply.getScore() >= jm.getBalancedStart(Difficulty.HARD)) {
-				d = Difficulty.HARD;
-			}
-			if(ply.getScore() >= jm.getBalancedStart(Difficulty.EXPERT)) {
-				d = Difficulty.EXPERT;
-			}
-		}
-		
-		int r = random(d.getMin(), d.getMax());
-		
-		//ply.getPlayer().sendMessage(ply.getScore()+":" + d.toString()+" ("+r+")");
-		
-		if(r > 4) {
-			maxy = 0;
-		}
-		if(r >= 5) {
-			r = 5;
-			maxy = 0;
-		}
-		
-		if(ply.getJumps().size() >= 2) {
-			int prevy = ply.getJumps().get(ply.jumps.size()-1).getFrom().getBlockY();
-			int prev2y = ply.getJumps().get(ply.jumps.size()-2).getFrom().getBlockY();
-			//ply.ply.sendMessage(prevy+" - "+prev2y+" = "+(prevy - prev2y));
-			if(prevy - prev2y > 0) {
-				maxy = 0;
-			}
-		}
-		
-		
-		bks.add(new Location(w, x+r, y, z));
-		bks.add(new Location(w, x-r, y, z));
-		bks.add(new Location(w, x+r, y+maxy, z));
-		bks.add(new Location(w, x-r, y+maxy, z));
-		bks.add(new Location(w, x+r, y-maxy, z));
-		bks.add(new Location(w, x-r, y-maxy, z));
-		bks.add(new Location(w, x, y+maxy, z+r));
-		bks.add(new Location(w, x, y-maxy, z+r));
-		bks.add(new Location(w, x, y+maxy, z-r));
-		bks.add(new Location(w, x, y-maxy, z-r));
-		bks.add(new Location(w, x, y+maxy, z+r));
-		bks.add(new Location(w, x, y, z+r));
-		bks.add(new Location(w, x, y, z-r));
-		
-		HashMap<Object, Double> sc = new HashMap<>();
-		for(Location bk : bks) {
-			sc.put(bk, (double)getBlockScore(bk, from, ply.getArea(), ply, ply.getPlayer().getLocation().getYaw()));
-		}
-		
-		/*for(Object k : sc.keySet()) {
-			Location l = Location.deserialize(((Location) k).serialize());;
-			l.setY(l.getY()+1);
-			Double s = sc.get(k);
-			l.getBlock().setType(Material.SIGN);
-			if(!(l.getBlock().getState() instanceof Sign)) return;
-			Sign sign = (Sign) l.getBlock().getState();
-			sign.setLine(0, s+"");
-			sign.update();
-		}*/
-		
-		LinkedHashMap<Object, Double> scs;
-		scs = main.sortByValueWithObjectKey(sc, false);
-		
-		
-		
-		Object[] scsk = scs.keySet().toArray();
-		
-		Double last = scs.get(scsk[scsk.length-1]);
-		Object selected;
-		
-		Map<Object, Double> poss = new HashMap<>();
-		for(Object key : scs.keySet()) {
-			Double v = scs.get(key);
-			if(Math.abs(v - last) < 0.0001) {
-				poss.put(key, v);
-			}
+		if(existing.size() >= 2) {
+			int prevy = existing.getLast().pos.y();
+			int prev2y = existing.get(existing.size() - 2).pos.y();
+			if(prevy - prev2y > 0) maxy = 0;
 		}
 
-		List<Object> posskeys = new ArrayList<>(poss.keySet());
-		
-		//System.out.println(posskeys.size()+" o: " + poss.keySet().size());
-		
-		int ki = Main.random(0, posskeys.size()-1);
-		selected = posskeys.get(ki);
-		
-		
-		blocks = new ArrayList<>();
-		blocks.add((Location) selected);
+		BlockPos[] candidates = new BlockPos[12];
+		int n = 0;
+		candidates[n++] = from.offset(r, 0, 0);
+		candidates[n++] = from.offset(-r, 0, 0);
+		candidates[n++] = from.offset(0, 0, r);
+		candidates[n++] = from.offset(0, 0, -r);
+		if(maxy != 0) {
+			candidates[n++] = from.offset(r, maxy, 0);
+			candidates[n++] = from.offset(-r, maxy, 0);
+			candidates[n++] = from.offset(r, -maxy, 0);
+			candidates[n++] = from.offset(-r, -maxy, 0);
+			candidates[n++] = from.offset(0, maxy, r);
+			candidates[n++] = from.offset(0, -maxy, r);
+			candidates[n++] = from.offset(0, maxy, -r);
+			candidates[n++] = from.offset(0, -maxy, -r);
+		}
+
+		PkArea area = ply.getArea();
+		float closest = closestDir(yaw);
+		int goodr = Main.random(-10, 1);
+		ChunkRead chunks = new ChunkRead();
+		if(others == null) others = NO_OTHERS;
+
+		int best = Integer.MIN_VALUE;
+		int bestN = 0;
+		BlockPos[] bestList = new BlockPos[n];
+		for(int i = 0; i < n; i++) {
+			int s = score(world, candidates[i], from, area, others, closest, goodr, chunks);
+			if(s > best) {
+				best = s;
+				bestList[0] = candidates[i];
+				bestN = 1;
+			} else if(s == best) {
+				bestList[bestN++] = candidates[i];
+			}
+		}
+		return new PkJump(ply, world, bestList[ThreadLocalRandom.current().nextInt(bestN)]);
 	}
-	
-	
+
 	/**
 	 * Calculates the score for a particular block location
 	 * @param block a {@link org.bukkit.Location Location} of the block to get the score of
@@ -152,330 +104,189 @@ public class PkJump {
 	 * @param yaw a float with the player's yaw (left-right looking)
 	 * @return the score of a block. (usually 0-10, but can be higher or lower)
 	 */
-	public static int getBlockScore(Location block, Location from, PkArea area, PkPlayer ply, float yaw) {
-		if(yaw < 0) {
-			yaw +=360;
+	public static int getBlockScore(Location block, Location from, PkArea area, @Nullable PkPlayer ply, float yaw) {
+		List<List<BlockPos>> others = new ArrayList<>();
+		for(PkPlayer p : Manager.getInstance().getPlayersInArea(area)) {
+			if(p != ply) others.add(p.jumpSnapshot());
 		}
-		
-		if(yaw > 180) {
-			yaw -= 360;
-			yaw = Math.abs(yaw)*-1;
+		return score(block.getWorld(), BlockPos.of(block), BlockPos.of(from), area, others, closestDir(yaw), Main.random(-10, 1), new ChunkRead());
+	}
+
+	static int getBlockScore(World world, BlockPos block, BlockPos from, PkArea area, Collection<List<BlockPos>> others, float yaw) {
+		return score(world, block, from, area, others, closestDir(yaw), Main.random(-10, 1), new ChunkRead());
+	}
+
+	private static int score(World world, BlockPos block, BlockPos from, PkArea area, Collection<List<BlockPos>> others,
+	                         float closest, int goodr, ChunkRead chunks) {
+		int x = block.x();
+		int y = block.y();
+		int z = block.z();
+
+		if(!chunks.readable(world, x, z)) return -340;
+		for(int dy : AIR_DY) {
+			if(!world.getType(x, y + dy, z).isAir()) return -40;
 		}
-		yaw *= -1; // I did the things below backwards, so this is a quick fix.
-
-
 
 		int score = 10;
-		
-		World world = block.getWorld();
-		int x = block.getBlockX();
-		int y = block.getBlockY();
-		int z = block.getBlockZ();
-		List<Location> shouldBeAir = Arrays.asList(
-				block,
-				new Location(world, x, y-1, z),
-				new Location(world, x, y-2, z),
-				new Location(world, x, y+3, z),
-				new Location(world, x, y+1, z),
-				new Location(world, x, y+2, z),
-				new Location(world, x, y+3, z)
-		);
-		boolean returnNow = false;
-		for(Location l : shouldBeAir) {
-			if(l.getBlock().getType().equals(Material.AIR)) continue;
-			returnNow = true;
-			score -= 50;
-		}
-		if(returnNow) return score;
-		
-		float[] dirs = new float[5];
-		dirs[0] = 0f; // +z
-		//dirs[1] = 45f; // +z,-x
-		dirs[1] = 90f; // -x
-		//dirs[3] = 135f; // -x, -z
-		dirs[2] = 180f; // -z
-		dirs[3] = -180f;
-		//dirs[5] = -135f; // -z +x
-		dirs[4] = -90f; // +x
-		
-		//dirs[7] = -45f; // +x +Z
-		
-		int xc = from.getBlockX()-block.getBlockX();
-		//int yc = from.getBlockY()-block.getBlockY();
-		int zc = from.getBlockZ()-block.getBlockZ();
-		
-		
-		//ply.getPlayer().sendMessage(ply.msgs.color("&9----------------"));
-		float closest;
-		float distance = Math.abs(dirs[0] - yaw);
-		int idx = 0;
-		for(int c = 1; c < dirs.length; c++){
-		    float cdistance = Math.abs(dirs[c] - yaw);
-		    //ply.getPlayer().sendMessage(dirs[c]+": "+cdistance + ply.msgs.color(" &7 | ")+dirs[c]+" - "+yaw);
-		    if(cdistance < distance){
-		        idx = c;
-		        distance = cdistance;
-		        //ply.getPlayer().sendMessage(ply.msgs.color("&a^"));
-		    }
-		}
-		closest = dirs[idx];
-		//ply.getPlayer().sendMessage(ply.msgs.color("&eClosest: " + closest+"\n&9-----------------"));
+		int xc = from.x() - x;
+		int zc = from.z() - z;
 
-		int goodr = Main.random(-10, 1);
-		
-		if(pos(zc) && zero(xc)) {
-			if(sfloatEquals(closest, 180f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, 135f) || sfloatEquals(closest, -135f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, -90f) || sfloatEquals(closest, 90f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-			
-		} else if(pos(zc) && neg(xc)) {
-			if(floatEquals(closest, 45f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, 90f) || sfloatEquals(closest, 0f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, 135f) || sfloatEquals(closest, -45f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-		} else if(neg(xc) && zero(zc)) {
-			if(floatEquals(closest, 90f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, 45f) || sfloatEquals(closest, 135f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, 0f) || sfloatEquals(closest, 180f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-		} else if(neg(xc) && neg(zc)) {
-			if(floatEquals(closest, 135f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, 90f) || sfloatEquals(closest, 180f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, -135f) || sfloatEquals(closest, 45f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-		} else if(neg(zc) && zero(xc)) {
-			if(floatEquals(closest, 0f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, 45f) || sfloatEquals(closest, -45f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, 90f) || sfloatEquals(closest, -90f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-		} else if(pos(xc) && neg(zc)) {
-			if(floatEquals(closest, -135f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, 180f) || sfloatEquals(closest, -90f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, 135f) || sfloatEquals(closest, -45f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-		} else if(pos(xc) && zero(zc)) {
-			if(floatEquals(closest, -90f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, -45f) || sfloatEquals(closest, -135f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, 0f) || sfloatEquals(closest, 180f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-		} else if(pos(xc) && pos(zc)) {
-			if(floatEquals(closest, -45f)) {
-				score += goodr;
-			} else if(sfloatEquals(closest, 0f) || sfloatEquals(closest, -90f)) {
-				score += 1;
-			} else if(sfloatEquals(closest, -135f) || sfloatEquals(closest, 45f)) {
-				score -= 3;
-			} else {
-				score -= 7;
-			}
-		} else {
-			Bukkit.getLogger().warning("[ajParkour] Could not find direction for jump score!");
+		if(xc == 0 && zc > 0) {
+			score += pick(closest, goodr, 180f, -90f, 90f);
+		} else if(xc < 0 && zc > 0) {
+			score += pick(closest, goodr, Float.NaN, 90f, 0f);
+		} else if(xc < 0 && zc == 0) {
+			score += pick(closest, goodr, 90f, 0f, 180f);
+		} else if(xc < 0) {
+			score += pick(closest, goodr, Float.NaN, 90f, 180f);
+		} else if(xc == 0 && zc < 0) {
+			score += pick(closest, goodr, 0f, 90f, -90f);
+		} else if(xc > 0 && zc < 0) {
+			score += pick(closest, goodr, Float.NaN, 180f, -90f);
+		} else if(xc > 0 && zc == 0) {
+			score += pick(closest, goodr, -90f, 0f, 180f);
+		} else if(xc > 0) {
+			score += pick(closest, goodr, Float.NaN, 0f, -90f);
 		}
-		
-		//Bukkit.broadcastMessage("After direction: "+score);
-		
-		List<Double> ds = new ArrayList<>();
-		for(PkPlayer p : Manager.getInstance().getPlayersInArea(area)) {
-			if(ply != null) {
-				if(p.equals(ply)) continue;
+
+		if(!others.isEmpty()) {
+			long closestOther = Long.MAX_VALUE;
+			for(List<BlockPos> jumps : others) {
+				for(BlockPos j : jumps) {
+					closestOther = Math.min(closestOther, block.distanceSquared(j));
+				}
 			}
-			List<Double> l = new ArrayList<>();
-			for(PkJump j : p.jumps) {
-				Location t = j.getFrom();
-				l.add(block.distance(t));
+			if(closestOther != Long.MAX_VALUE) {
+				long ch = 7 - Math.round(Math.sqrt(closestOther));
+				if(ch > 0) score -= (int) ch;
 			}
-			Collections.sort(l);
-			ds.add(l.get(0));
 		}
-		if(ds.size() > 0) {
-			Collections.sort(ds);
-			long ch = 7-Math.round(ds.get(0));
-			score -= (ch > 0) ? ch : 0;
+
+		int d = area.distanceFromWall(x, y, z);
+		if(!area.contains(x, y, z)) {
+			d = -Math.abs(d);
+			score = -10;
 		}
-		
-		//Bukkit.broadcastMessage("After players: "+score);
-		
-		
-		int d = (int) Math.round(area.distanceFromWall(block));
-		
-		if(!area.contains(block)) {
-			d = Math.abs(d) * -1;
-			score =- 10;
-		}
-		//Bukkit.broadcastMessage("d obounds: "+d);
-		
-		if(d <= 0) {
-			d -= 10;
-		}
-		//Bukkit.broadcastMessage("d ebounds: "+d);
-		
+		if(d <= 0) d -= 10;
 		if(d < 7 && d >= 0) {
-			score -= 7-d;
+			score -= 7 - d;
 		} else if(d < 0) {
 			score += d;
 		}
-		//Bukkit.broadcastMessage("After bounds: "+score);
-	
-		
 		return score;
 	}
-	
-	
-	
+
+	private static float closestDir(float yaw) {
+		if(yaw < 0) yaw += 360;
+		if(yaw > 180) {
+			yaw -= 360;
+			yaw = Math.abs(yaw) * -1;
+		}
+		yaw *= -1;
+		float distance = Math.abs(DIRS[0] - yaw);
+		int idx = 0;
+		for(int c = 1; c < DIRS.length; c++) {
+			float cdistance = Math.abs(DIRS[c] - yaw);
+			if(cdistance < distance) {
+				idx = c;
+				distance = cdistance;
+			}
+		}
+		return DIRS[idx];
+	}
+
+	/**
+	 * Direction scoring. For straight jumps, {@code best} gets the random bonus and {@code a}/{@code b} get -3.
+	 * For diagonal jumps ({@code best} is NaN), {@code a}/{@code b} get +1. Everything else gets -7.
+	 */
+	private static int pick(float closest, int goodr, float best, float a, float b) {
+		if(!Float.isNaN(best)) {
+			if(same(closest, best)) return goodr;
+			if(same(closest, a) || same(closest, b)) return -3;
+			return -7;
+		}
+		if(same(closest, a) || same(closest, b)) return 1;
+		return -7;
+	}
+
+	private static boolean same(float o, float t) {
+		if(Math.abs(t - 180f) < 0.001 && Math.abs(o + 180f) < 0.001) return true;
+		return Math.abs(o - t) < 0.001;
+	}
+
+	private static final class ChunkRead {
+		private int cx = Integer.MIN_VALUE;
+		private int cz;
+		private boolean ok;
+
+		boolean readable(World world, int x, int z) {
+			int nx = x >> 4;
+			int nz = z >> 4;
+			if(nx == cx && nz == cz) return ok;
+			cx = nx;
+			cz = nz;
+			return ok = world.isChunkLoaded(nx, nz) && Bukkit.isOwnedByCurrentRegion(world, nx, nz);
+		}
+	}
+
+	public BlockPos pos() {
+		return pos;
+	}
+
 	/**
 	 * Get 'from' location
 	 * @return a {@link org.bukkit.Location Location} that the player is supposed to jump from this jump to the next one
 	 */
 	public Location getFrom() {
-		Location r = blocks.get(blocks.size()-1);
-		if(r == null) Bukkit.getLogger().warning("[ajParkour] Warning: getFrom() returned null!");
-		return r;
+		return pos.toLocation(world);
 	}
+
 	/**
 	 * Get 'to' location
 	 * @return a {@link org.bukkit.Location Location} that the player is supposed to jump to from the previous jump
 	 */
 	public Location getTo() {
-		return blocks.get(0);
+		return pos.toLocation(world);
 	}
-	
-	
+
 	/**
 	 * Places all blocks for this jump
 	 */
 	public void place() {
-		for(Location l : blocks) {
-			Material prev = l.getBlock().getType();
-			String type = ply.getBlock();
-			if(((String) main.config.get("random-block-selection")).equalsIgnoreCase("each")) {
-				type = main.selector.getBlock(ply.getPlayer(), ply.getArea());
-			}
-			MaterialParser.placeBlock(l, type);
-			l.getBlock().setMetadata("ajpk-prevtype", new FixedMetadataValue(main, prev));
-			if(type.equalsIgnoreCase("SKULL") || type.equalsIgnoreCase("PLAYER_HEAD")) {
-				List<UUID> presents = main.selector.getPresents();
-				Skull sd = (Skull) l.getBlock().getState();
-				UUID id = presents.get(Main.random(0, presents.size()-1));
-				OfflinePlayer p = Bukkit.getOfflinePlayer(id);
-				ply.ply.sendMessage(p.getName());
-				sd.setOwningPlayer(p);
-				sd.update();
-			}
-		}
+		Main main = ply.plugin;
+		Material type = main.settings().randomBlockEachJump()
+				? main.selector.getBlockMaterial(ply.getPlayer(), ply.getArea())
+				: ply.getBlockMaterial();
+		List<UUID> presents = type == Material.PLAYER_HEAD ? main.selector.getPresents() : List.of();
 		placed = true;
+		int x = pos.x();
+		int y = pos.y();
+		int z = pos.z();
+		Tasks.region(world, x, z, () -> {
+			Block b = world.getBlockAt(x, y, z);
+			b.setType(type, false);
+			if(presents.isEmpty()) return;
+			if(b.getState(false) instanceof Skull skull) {
+				skull.setProfile(ResolvableProfile.resolvableProfile()
+						.uuid(presents.get(ThreadLocalRandom.current().nextInt(presents.size())))
+						.build());
+				skull.update(true, false);
+			}
+		});
 	}
-	
+
 	public boolean isPlaced() {
 		return placed;
 	}
-	
-	/*
-	public static GameProfile getNonPlayerProfile(String skinURL, boolean randomName) {
-		GameProfile newSkinProfile = new GameProfile(UUID.randomUUID(), randomName ? getRandomString(16) : null);
-		newSkinProfile.getProperties().put("textures", new Property("textures", Base64Coder.encodeString("{textures:{SKIN:{url:\"" + skinURL + "\"}}}")));
-		return newSkinProfile;
-		}
-	public static void setSkullWithNonPlayerProfile(String skinURL, boolean randomName, Block skull) {
-		if(skull.getType() != Material.SKULL)
-		throw new IllegalArgumentException("Block must be a skull.");
-		TileEntitySkull skullTile = (TileEntitySkull)((CraftWorld)skull.getWorld()).getHandle().getTileEntity(skull.getX(), skull.getY(), skull.getZ());
-		skullTile.setGameProfile(getNonPlayerProfile(skinURL, randomName));
-		skull.getWorld().refreshChunk(skull.getChunk().getX(), skull.getChunk().getZ());
-		}*/
-	
 
 	/**
 	 * Breaks all blocks from this jump
 	 */
 	public void remove() {
-		for(Location l : blocks) {
-			//List<MetadataValue> metaDataValues = l.getBlock().getMetadata("PlacedBlock");
-			//Material prev = null;
-			//for (MetadataValue value : metaDataValues) {
-		    //    prev = (Material) value.value();
-		    //}
-			//if(prev != null) {
-			//	l.getBlock().setType(prev);
-			//} else {
-				l.getBlock().setType(Material.AIR);
-			//}
-		}
 		placed = false;
+		int x = pos.x();
+		int y = pos.y();
+		int z = pos.z();
+		Tasks.region(world, x, z, () -> world.getBlockAt(x, y, z).setBlockData(AIR, false));
 	}
-	
-	
-	private static boolean pos(int x) {
-		return x > 0;
-	}
-	
-	private static boolean neg(int x) {
-		return x < 0;
-	}
-	private static boolean zero(int x) {
-		return x == 0;
-	}
-	private static boolean sfloatEquals(float o, float t) {
-		float d = Math.abs(o - t);
-		if(floatEquals(t, 180f)) {
-			if(floatEquals(o, -180f)) {
-				return true;
-			}
-		}
-		return d < 0.001;
-	}
-	private static boolean floatEquals(float o, float t) {
-		return Math.abs(o - t) < 0.001;
-	}
-	
-	
-	private static int random(int min, int max) {
-
-
-		if (min > max) {
-			throw new IllegalArgumentException("max must be greater than min: "+min+"-"+max);
-		} else if(min == max) {
-			return min;
-		}
-
-		Random r = new Random();
-		return r.nextInt((max - min) + 1) + min;
-	}
-
-
 }

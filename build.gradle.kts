@@ -1,54 +1,73 @@
 plugins {
     java
-    id("com.github.johnrengelman.shadow").version("6.1.0")
     `maven-publish`
+    id("com.gradleup.shadow") version "9.6.1"
+    id("xyz.jpenilla.run-paper") version "3.1.0"
 }
 
 group = "us.ajg0702"
-version = "2.12.11"
+version = "3.0.0"
+
+val minecraftVersion = "26.3"
 
 repositories {
-  mavenCentral()
-
-  maven { url = uri("https://oss.sonatype.org/content/repositories/snapshots") }
-  maven { url = uri("https://hub.spigotmc.org/nexus/content/repositories/snapshots/") }
-  maven { url = uri("https://repo.extendedclip.com/releases/") }
-  maven { url = uri("https://repo.papermc.io/repository/maven-public/") }
-  maven { url = uri("https://maven.enginehub.org/repo/") }
-  maven { url = uri("https://gitlab.com/api/v4/projects/19978391/packages/maven") }
+    mavenCentral()
+    maven("https://repo.papermc.io/repository/maven-public/")
+    maven("https://repo.extendedclip.com/releases/")
+    maven("https://maven.enginehub.org/repo/")
 }
 
 dependencies {
-  compileOnly("org.spigotmc:spigot-api:1.12.2-R0.1-SNAPSHOT")
-  compileOnly("me.clip:placeholderapi:2.11.5")
-  compileOnly("com.sk89q.worldedit:worldedit-bukkit:7.0.1")
-  compileOnly(files("libs/InfiniteJump.jar"))
+    compileOnly("io.papermc.paper:paper-api:$minecraftVersion.build.+")
+    compileOnly("me.clip:placeholderapi:2.12.3")
+    compileOnly("com.sk89q.worldedit:worldedit-bukkit:7.4.5") { isTransitive = false }
+    compileOnly("com.sk89q.worldedit:worldedit-core:7.4.5") { isTransitive = false }
+    compileOnly(files("libs/InfiniteJump.jar"))
 
-  implementation("com.zaxxer:HikariCP:3.4.5")
-  implementation("org.slf4j:slf4j-simple:1.6.4")
-  implementation("us.ajg0702:ajUtils:1.0.0")
-}
-
-tasks.withType<ProcessResources> {
-    include("**/*.yml")
-    filter<org.apache.tools.ant.filters.ReplaceTokens>(
-            "tokens" to mapOf(
-                    "VERSION" to project.version.toString()
-            )
-    )
-}
-
-tasks.shadowJar {
-    relocate("us.ajg0702.utils", "us.ajg0702.parkour.utils")
-    relocate("com.zaxxer.hikari", "us.ajg0702.parkour.hikari")
-
-    archiveClassifier.set("")
+    implementation("com.zaxxer:HikariCP:7.1.0") { exclude(group = "org.slf4j") }
+    implementation("org.bstats:bstats-bukkit:3.2.1")
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
 }
+
+tasks {
+    withType<JavaCompile>().configureEach {
+        options.encoding = "UTF-8"
+        options.release = 25
+        options.compilerArgs.addAll(listOf("-Xlint:all,-processing,-serial", "-parameters"))
+    }
+
+    processResources {
+        val props = mapOf("version" to project.version, "apiVersion" to minecraftVersion)
+        inputs.properties(props)
+        filesMatching("paper-plugin.yml") {
+            filter<org.apache.tools.ant.filters.ReplaceTokens>(
+                "tokens" to mapOf("VERSION" to props["version"].toString(), "API_VERSION" to props["apiVersion"].toString())
+            )
+        }
+    }
+
+    shadowJar {
+        archiveClassifier = ""
+        relocate("com.zaxxer.hikari", "us.ajg0702.parkour.libs.hikari")
+        relocate("org.bstats", "us.ajg0702.parkour.libs.bstats")
+        minimize {
+            exclude(dependency("com.zaxxer:HikariCP:.*"))
+        }
+    }
+
+    build {
+        dependsOn(shadowJar)
+    }
+
+    runServer {
+        minecraftVersion(minecraftVersion)
+    }
+}
+
+runPaper.folia.registerTask()
 
 publishing {
     publications {
@@ -58,10 +77,9 @@ publishing {
     }
 
     repositories {
-
         val mavenUrl = "https://repo.ajg0702.us/releases"
 
-        if(!System.getenv("REPO_TOKEN").isNullOrEmpty()) {
+        if (!System.getenv("REPO_TOKEN").isNullOrEmpty()) {
             maven {
                 url = uri(mavenUrl)
                 name = "ajRepo"
@@ -74,4 +92,3 @@ publishing {
         }
     }
 }
-

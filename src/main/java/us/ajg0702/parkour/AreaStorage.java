@@ -1,393 +1,288 @@
 package us.ajg0702.parkour;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Set;
-
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
-import org.bukkit.entity.Player;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerMoveEvent;
-
+import org.jspecify.annotations.Nullable;
+import us.ajg0702.parkour.game.BlockPos;
 import us.ajg0702.parkour.game.Difficulty;
-import us.ajg0702.parkour.game.Manager;
 import us.ajg0702.parkour.game.PkArea;
-import us.ajg0702.utils.spigot.Config;
 
-public class AreaStorage implements Listener {
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.logging.Level;
 
-	Main plugin;
-	
-	File configfile;
-	YamlConfiguration config;
-	
-	Config mainConfig;
-	
-	Messages msgs;
-	
-	
+/**
+ * Stores parkour areas and portals (positions.yml). Everything is parsed once and kept in immutable snapshots,
+ * so lookups (including the per-move portal check) never touch YAML.
+ */
+public class AreaStorage {
+
+	private final Main plugin;
+	private final File configfile;
+	private YamlConfiguration config;
+
+	private volatile List<PkArea> areas = List.of();
+	private volatile Map<String, PkArea> areasByName = Map.of();
+	private volatile List<Portal> portals = List.of();
+	private volatile Map<UUID, Map<Long, Portal>> portalIndex = Map.of();
+	private volatile Set<String> areaNames = Set.of();
+	private volatile Set<String> portalNames = Set.of();
+
 	public AreaStorage(Main plugin) {
 		this.plugin = plugin;
-		
-		msgs = plugin.msgs;
-		
-		mainConfig = plugin.getAConfig();
-		
-		configfile = new File(plugin.getDataFolder(), "positions.yml");
-		config = YamlConfiguration.loadConfiguration(configfile);
-		
-		
-		if(mainConfig.getBoolean("enable-portals") && !mainConfig.getBoolean("faster-portals")) {
-			plugin.getServer().getPluginManager().registerEvents(this, plugin);
-		}
-		
-		if(mainConfig.getBoolean("enable-portals") && mainConfig.getBoolean("faster-portals")) {
-			Bukkit.getScheduler().scheduleSyncRepeatingTask(plugin, () -> {
-				for(Player p : Bukkit.getOnlinePlayers()) {
-					checkPortal(new PlayerMoveEvent(p, p.getLocation(), p.getLocation()));
-				}
-			}, 3*20, 5);
-		}
-		
-		
-		saveFile();
+		this.configfile = new File(plugin.getDataFolder(), "positions.yml");
+		this.config = YamlConfiguration.loadConfiguration(configfile);
 	}
-	
-	public void save(PkArea area) {
-		HashMap<String, Object> d = new HashMap<>();
-		d = add(d, "pos1", area.getPos1());
-		d = add(d, "pos2", area.getPos2());
-		d = add(d, "fallpos", area.getFallPos());
-		d = add(d, "difficulty", area.getDifficulty().toString());
-		d = add(d, "max", area.getMax());
-		config.set("areas."+area.getName(), d);
-		saveFile();
-	}
-	
-	public void reload() {
-		configfile = new File(plugin.getDataFolder(), "positions.yml");
-		config = YamlConfiguration.loadConfiguration(configfile);
-	}
-	
+
+	// ------------------------------------------------------------------ queries
+
 	public List<PkArea> getAreas() {
-		if(!config.isSet("areas")) {
-			return new ArrayList<>();
-		}
-		ConfigurationSection s = (ConfigurationSection) config.get("areas");
-		if(s == null) {
-			return new ArrayList<>();
-		}
-		List<PkArea> list = new ArrayList<>();
-		for(String name : s.getKeys(false)) {
-			Location p1 = parseLoc(s.getString(name+".pos1"));
-			Location p2 = parseLoc(s.getString(name+".pos2"));
-			Location fp = parseLoc(s.getString(name+".fallpos"));
-			String diffraw = s.getString(name+".difficulty");
-			int maxplayers = s.getInt(name+".max", -1);
-			if(diffraw == null) {
-				diffraw = "BALANCED";
-				Bukkit.getLogger().warning("[ajParkour] Could not load difficulty for area '"+name+"'! Defaulting to BALANCED. Please edit the area and set the difficulty!");
+		return areas;
+	}
+
+	public @Nullable PkArea getArea(@Nullable String name) {
+		return name == null ? null : areasByName.get(name.toLowerCase(Locale.ROOT));
+	}
+
+	public List<Portal> getPortals() {
+		return portals;
+	}
+
+	public boolean hasPortals() {
+		return !portalIndex.isEmpty();
+	}
+
+	public @Nullable Portal portalAt(Location l) {
+		Map<UUID, Map<Long, Portal>> index = portalIndex;
+		if(index.isEmpty()) return null;
+		Map<Long, Portal> world = index.get(l.getWorld().getUID());
+		return world == null ? null : world.get(BlockPos.key(l.getBlockX(), l.getBlockY(), l.getBlockZ()));
+	}
+
+	/** Names of every configured area, including ones that failed to load. */
+	public Set<String> getAreaNames() {
+		return areaNames;
+	}
+
+	public Set<String> getPortalNames() {
+		return portalNames;
+	}
+
+	public boolean hasArea(String name) {
+		return areaNames.contains(name) || areasByName.containsKey(name.toLowerCase(Locale.ROOT));
+	}
+
+	// ------------------------------------------------------------------ loading
+
+	public synchronized void reload() {
+		config = YamlConfiguration.loadConfiguration(configfile);
+		migrateOldPortals();
+		rebuild();
+	}
+
+	private void rebuild() {
+		List<PkArea> newAreas = new ArrayList<>();
+		ConfigurationSection s = config.getConfigurationSection("areas");
+		if(s != null) {
+			for(String name : s.getKeys(false)) {
+				try {
+					PkArea area = parseArea(name, s);
+					if(area != null) newAreas.add(area);
+				} catch(IllegalArgumentException e) {
+					plugin.getLogger().warning("Could not load area '" + name + "': " + e.getMessage());
+				}
 			}
-			Difficulty diff;
+		}
+		Map<String, PkArea> byName = new HashMap<>();
+		for(PkArea a : newAreas) byName.put(a.getName().toLowerCase(Locale.ROOT), a);
+		areas = List.copyOf(newAreas);
+		areasByName = Map.copyOf(byName);
+		areaNames = s == null ? Set.of() : Set.copyOf(new TreeSet<>(s.getKeys(false)));
+
+		List<Portal> newPortals = new ArrayList<>();
+		Map<UUID, Map<Long, Portal>> index = new HashMap<>();
+		ConfigurationSection ps = config.getConfigurationSection("portals");
+		if(ps != null) {
+			for(String name : ps.getKeys(false)) {
+				Location loc;
+				try {
+					loc = parseLoc(ps.getString(name + ".loc"));
+				} catch(IllegalArgumentException e) {
+					plugin.getLogger().warning("Could not load portal '" + name + "': " + e.getMessage());
+					continue;
+				}
+				if(loc == null || loc.getWorld() == null) {
+					plugin.getLogger().warning("Could not load portal '" + name + "': its world is not loaded.");
+					continue;
+				}
+				String areaRaw = ps.getString(name + ".area");
+				PkArea area = null;
+				if(areaRaw != null) {
+					area = getArea(areaRaw);
+					if(area == null) {
+						plugin.getLogger().warning("Unable to load area for portal '" + name + "'! Did the area get deleted?");
+					}
+				}
+				Portal portal = new Portal(name, loc, area);
+				newPortals.add(portal);
+				index.computeIfAbsent(loc.getWorld().getUID(), _ -> new HashMap<>())
+						.put(BlockPos.key(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ()), portal);
+			}
+		}
+		Map<UUID, Map<Long, Portal>> frozen = new HashMap<>();
+		index.forEach((k, v) -> frozen.put(k, Map.copyOf(v)));
+		portals = List.copyOf(newPortals);
+		portalIndex = Map.copyOf(frozen);
+		portalNames = ps == null ? Set.of() : Set.copyOf(new TreeSet<>(ps.getKeys(false)));
+	}
+
+	private @Nullable PkArea parseArea(String name, ConfigurationSection s) {
+		Location p1 = parseLoc(s.getString(name + ".pos1"));
+		Location p2 = parseLoc(s.getString(name + ".pos2"));
+		Location fp = parseLoc(s.getString(name + ".fallpos"));
+		if(p1 == null || p2 == null) {
+			plugin.getLogger().warning("Area '" + name + "' is missing a position. Please edit the area and set both positions!");
+			return null;
+		}
+		if(p1.getWorld() == null) {
+			plugin.getLogger().warning("Area '" + name + "' is in a world that isn't loaded. Skipping it.");
+			return null;
+		}
+		String diffraw = s.getString(name + ".difficulty");
+		Difficulty diff;
+		if(diffraw == null) {
+			diff = Difficulty.BALANCED;
+			plugin.getLogger().warning("Could not load difficulty for area '" + name + "'! Defaulting to BALANCED. Please edit the area and set the difficulty!");
+		} else {
 			try {
-				diff = Difficulty.valueOf(diffraw);
+				diff = Difficulty.valueOf(diffraw.toUpperCase(Locale.ROOT));
 			} catch(IllegalArgumentException e) {
 				diff = Difficulty.BALANCED;
-				Bukkit.getLogger().warning("[ajParkour] Could not load difficulty for area '"+name+"'! Defaulting to BALANCED. Please edit the area and fix the difficulty!");
+				plugin.getLogger().warning("Could not load difficulty for area '" + name + "'! Defaulting to BALANCED. Please edit the area and fix the difficulty!");
 			}
-			//System.out.println(name+", "+nstring(p1)+", "+nstring(p2)+", "+nstring(fp));
-			list.add(new PkArea(name, p1, p2, fp, diff, maxplayers));
 		}
-		return list;
+		return new PkArea(name, p1, p2, fp, diff, s.getInt(name + ".max", -1));
 	}
-	
-	
-	public void save(Portal portal) {
-		HashMap<String, Object> d = new HashMap<>();
-		d = add(d, "loc", portal.getLoc());
-		
-		PkArea ar = portal.getArea();
-		if(ar != null) {
-			d = add(d, "area", ar.getName());
+
+	private void migrateOldPortals() {
+		if(config.isSet("portals")) return;
+		YamlConfiguration oldconfig = YamlConfiguration.loadConfiguration(new File(plugin.getDataFolder(), "config.yml"));
+		if(!oldconfig.isSet("area.portals")) return;
+		int i = 0;
+		for(Map<?, ?> p : oldconfig.getMapList("area.portals")) {
+			i++;
+			World world = Bukkit.getWorld(String.valueOf(p.get("world")));
+			if(world == null) {
+				plugin.getLogger().warning("Could not convert portal: Unknown world '" + p.get("world") + "'!");
+				continue;
+			}
+			Location ploc = new Location(world,
+					Integer.parseInt(String.valueOf(p.get("x"))),
+					Integer.parseInt(String.valueOf(p.get("y"))),
+					Integer.parseInt(String.valueOf(p.get("z"))));
+			config.set("portals." + i, serialize(new Portal(Integer.toString(i), ploc, null)));
 		}
-	
-		config.set("portals."+portal.getName(), d);
 		saveFile();
 	}
-	
-	public List<Portal> getPortals() {
-		if(!config.isSet("portals")) {
-			YamlConfiguration oldconfig = YamlConfiguration.loadConfiguration(new File(plugin.getDataFolder(), "config.yml"));
-			if(oldconfig.isSet("area.portals")) {
-				@SuppressWarnings("unchecked")
-				List<HashMap<String, Object>> oldportals = (List<HashMap<String, Object>>) oldconfig.getList("area.portals");
-				int i = 0;
-				for(HashMap<String, Object> p : oldportals) {
-					i++;
-					World world = Bukkit.getWorld(p.get("world").toString());
-					if(world == null) {
-						Bukkit.getLogger().warning("[ajParkour] Could not convert portal: Unknown world '" + p.get("world").toString()+"'!");
-					}
-					int x = Integer.parseInt(p.get("x").toString());
-					int y = Integer.parseInt(p.get("y").toString());
-					int z = Integer.parseInt(p.get("z").toString());
-					Location ploc = new Location(world, x, y, z);
-					save(new Portal(i+"", ploc, null));
-				}
-				Bukkit.getScheduler().scheduleSyncDelayedTask(plugin, this::reload, 20);
-			} else {
-				return new ArrayList<>();
-			}
-		}
-		ConfigurationSection s = (ConfigurationSection) config.get("portals");
-		if(s == null) {
-			return new ArrayList<>();
-		}
-		List<Portal> list = new ArrayList<>();
-		for(String name : s.getKeys(false)) {
-			//Bukkit.getLogger().info("[ajParkour] Portal: "+name);
-			Location loc = parseLoc(s.getString(name+".loc"));
-			String arearaw = s.getString(name+".area");
-			
-			PkArea area = null;
-			if(arearaw != null) {
-				PkArea t = plugin.man.getArea(arearaw);
-				if(t != null) {
-					area = t;
-				} else {
-					Bukkit.getLogger().warning("[ajParkour] Unable to load area for portal '"+name+"'! Did the area get deleted?");
-				}
-			}
 
-			//Bukkit.getLogger().info("[ajParkour] adding portal "+name+" to list");
-			list.add(new Portal(name, loc, area));
-		}
-		return list;
+	// ------------------------------------------------------------------ editing
+
+	public synchronized void save(PkArea area) {
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("pos1", locString(area.getPos1()));
+		d.put("pos2", locString(area.getPos2()));
+		if(area.getFallPos() != null) d.put("fallpos", locString(area.getFallPos()));
+		d.put("difficulty", area.getDifficulty().toString());
+		d.put("max", area.getRawMax());
+		config.set("areas." + area.getName(), d);
+		saveFile();
+		rebuild();
 	}
-	
-	@SuppressWarnings("unused")
-	private String nstring(Object raw) {
-		if(raw == null) {
-			return "null";
-		}
-		return raw+"";
+
+	public synchronized void save(Portal portal) {
+		config.set("portals." + portal.getName(), serialize(portal));
+		saveFile();
+		rebuild();
 	}
-	
-	
-	public Location parseLoc(String raw) {
+
+	private Map<String, Object> serialize(Portal portal) {
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("loc", locString(portal.getLoc()));
+		if(portal.getArea() != null) d.put("area", portal.getArea().getName());
+		return d;
+	}
+
+	public synchronized void removeArea(String area) {
+		if(!config.isSet("areas." + area)) return;
+		config.set("areas." + area, null);
+		saveFile();
+		rebuild();
+	}
+
+	public synchronized boolean removePortal(String name) {
+		if(!config.isSet("portals." + name)) return false;
+		config.set("portals." + name, null);
+		saveFile();
+		rebuild();
+		return true;
+	}
+
+	/** Serializes on the calling thread, writes the file on the IO thread. */
+	private void saveFile() {
+		config.options().setHeader(List.of(
+				" This is where the plugin stores all the areas and portals.",
+				" Be careful when editing this file, it could cause some areas or portals to fail to load!"));
+		String data = config.saveToString();
+		plugin.io().execute(() -> {
+			try {
+				File tmp = new File(configfile.getParentFile(), configfile.getName() + ".tmp");
+				Files.writeString(tmp.toPath(), data, StandardCharsets.UTF_8);
+				Files.move(tmp.toPath(), configfile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+			} catch(IOException e) {
+				plugin.getLogger().log(Level.SEVERE, "Failed to save areas config:", e);
+			}
+		});
+	}
+
+	// ------------------------------------------------------------------ helpers
+
+	public static @Nullable Location parseLoc(@Nullable String raw) {
 		if(raw == null) return null;
 		String[] a = raw.split(",");
 		if(a.length == 6) {
 			return new Location(Bukkit.getWorld(a[0]), Double.parseDouble(a[1]), Double.parseDouble(a[2]), Double.parseDouble(a[3]), Float.parseFloat(a[4]), Float.parseFloat(a[5]));
-		}
-		else if(a.length == 4) {
+		} else if(a.length == 4) {
 			return new Location(Bukkit.getWorld(a[0]), Double.parseDouble(a[1]), Double.parseDouble(a[2]), Double.parseDouble(a[3]));
-		} else {
-			throw new IllegalArgumentException("Excepted 4 or 6 numbers but got " + a.length);
 		}
+		throw new IllegalArgumentException("Expected 4 or 6 numbers but got " + a.length);
 	}
-	
-	private void saveFile() {
-		config.options().header(" This is where the plugin stores all the areas and portals.\n "
-				+ "Be careful when editing this file, it could cause some areas or portals to fail to load!");
-		config.options().copyHeader(true);
-		try {
-			config.save(configfile);
-		} catch (IOException e) {
-			Bukkit.getLogger().severe("[ajParkour] Failed to save areas config:");
-			e.printStackTrace();
-		}
-	}
-	
-	
-	private HashMap<String, Object> add(HashMap<String, Object> before, String key, Object add) {
-		if(add instanceof Location) {
-			Location l = (Location) add;
-			String world = l.getWorld().getName();
-			int x = l.getBlockX();
-			int y = l.getBlockY();
-			int z = l.getBlockZ();
-			float p = l.getPitch();
-			float yaw = l.getYaw();
-			before.put(key, world+","+x+","+y+","+z+","+yaw+","+p);
-		} else {
-			before.put(key, add);
-		}
-		
-		return before; 
-	}
-	
-	
-	public void setupPortals(Player p, String[] args, String label) {
-		
-		if(args.length == 1) {
-			sendPortalHelp(p, label);
-			return;
-		}
-		switch(args[1]) {
-		case "list":
-			StringBuilder f = new StringBuilder(msgs.get("portals.list.header", p) + "\n");
-			for(Portal po : getPortals()) {
-				String name = po.getName();
-				String coords = coordsString(po.getLoc());
-				PkArea area = po.getArea();
-				if(area != null && !area.getName().isEmpty()) {
-					f.append(msgs.get("portals.list.format.area", p)
-							.replaceAll("\\{NAME}", name)
-							.replaceAll("\\{COORDS}", coords)
-							.replaceAll("\\{AREA}", area.getName())).append("\n");
-				} else {
-					f.append(msgs.get("portals.list.format.no-area", p)
-							.replaceAll("\\{NAME}", name)
-							.replaceAll("\\{COORDS}", coords)).append("\n");
-				}
-			}
-			p.sendMessage(f.toString());
-			break;
-		case "create":
-			if(args.length < 3) {
-				p.sendMessage(msgs.get("portals.create.help", p).replaceAll("\\{CMD}", label));
-				return;
-			}
-			String name = args[2];
-			PkArea area = null;
-			if(args.length >= 4) {
-				String areaname = args[3];
-				area = plugin.man.getArea(areaname);
-			}
-			Location loc = p.getLocation();
-			Portal newp = new Portal(name, loc, area);
-			save(newp);
-			reload();
-			Manager.getInstance().reloadPositions();
-			p.sendMessage(msgs.get("portals.create.success", p).replaceAll("\\{NAME}", name));
-			
-			break;
-		case "remove":
-			if(args.length < 3) {
-				p.sendMessage(msgs.get("portals.remove.help", p));
-				break;
-			}
-			String portalname = args[2];
-			Set<String> portals = config.getConfigurationSection("portals").getKeys(false);
-			if(portals.contains(portalname)) {
-				config.set("portals."+portalname, null);
-				p.sendMessage(msgs.get("portals.remove.success", p).replaceAll("\\{NAME}", portalname));
-				saveFile();
-				Manager.getInstance().reloadPositions();
-			} else {
-				p.sendMessage(msgs.get("portals.remove.cannot-find", p));
-			}
-			break;
-		default:
-			sendPortalHelp(p, label);
-			break;
-		}
-		
-	}
-	
-	private void sendPortalHelp(Player p, String label) {
-		List<String> h = new ArrayList<>();
-		
-		h.add(msgs.get("commands.portals.header", p));
-		h.add(msgs.get("commands.portals.list", p));
-		h.add(msgs.get("commands.portals.create", p));
-		h.add(msgs.get("commands.portals.remove", p));
 
-		
-		StringBuilder s = new StringBuilder();
-		for(String t : h) {
-			s.append("\n").append(t);
-		}
-		p.sendMessage(s.toString().replaceAll("\\{CMD}", label));
+	private static String locString(Location l) {
+		return l.getWorld().getName() + "," + l.getBlockX() + "," + l.getBlockY() + "," + l.getBlockZ() + "," + l.getYaw() + "," + l.getPitch();
 	}
-	
-	
-	public void removeArea(String area) {
-		if(!config.isSet("areas."+area)) {
-			return;
-		}
-		config.set("areas."+area, null);
-		saveFile();
-		reload();
-		Manager.getInstance().reloadPositions();
-	}
-	
-	
-	@EventHandler
-	public void checkPortal(PlayerMoveEvent e) {
-		
-		/*float yaw = e.getPlayer().getLocation().getYaw(); // this is me messing with converting from (0 to 360) to (0 to 180 & -180 to 0)
-		float oyaw = Float.valueOf(yaw);
-		
-		
-		if(yaw < 0) {
-			yaw +=360;
-		}
-		
-		if(yaw > 180) {
-			yaw -= 360;
-			yaw = Math.abs(yaw)*-1;
-		}
-		
-		e.getPlayer().sendMessage(yaw+" o: "+oyaw);*/
-		
-		if(Manager.getInstance().inParkour(e.getPlayer())) {
-			return;
-		}
-		
-		
-		Location l = e.getTo();
-		List<Portal> portals = getPortals();
-		for(Portal p : portals) {
-			//e.getPlayer().sendMessage("Portal: "+p.getName());
-			Location loc = p.getLoc();
-			PkArea area = p.getArea();
-			
-			World playerworld = l.getWorld();
-			
-			if(!playerworld.equals(loc.getWorld())) continue;
-			
-			int tx = loc.getBlockX();
-			int ty = loc.getBlockY();
-			int tz = loc.getBlockZ();
-			
-			int x = l.getBlockX();
-			int y = l.getBlockY();
-			int z = l.getBlockZ();
-			
-			if(tx != x || ty != y || tz != z) continue;
-			
-			if(area != null) {
-				plugin.man.startGame(e.getPlayer(), area);
-			} else {
-				plugin.man.startGame(e.getPlayer());
-			}
-		}
-	}
-	
-	public static String coordsString(Location loc) {
+
+	public static String coordsString(@Nullable Location loc) {
 		return coordsString(loc, false);
 	}
-	public static String coordsString(Location loc, boolean world) {
+
+	public static String coordsString(@Nullable Location loc, boolean world) {
 		if(loc == null) return "null";
-		String w = loc.getWorld().getName();
-		int x = loc.getBlockX();
-		int y = loc.getBlockY();
-		int z = loc.getBlockZ();
-		if(world) {
-			return w+": "+x+", "+y+", "+z;
-		} else {
-			return x+", "+y+", "+z;
-		}
+		String coords = loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ();
+		return world ? loc.getWorld().getName() + ": " + coords : coords;
 	}
-	
 }

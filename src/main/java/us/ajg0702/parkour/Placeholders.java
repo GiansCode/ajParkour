@@ -1,248 +1,121 @@
 package us.ajg0702.parkour;
 
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
-import org.bukkit.entity.Player;
+import org.bukkit.OfflinePlayer;
+import org.jspecify.annotations.Nullable;
 import us.ajg0702.parkour.game.PkArea;
 import us.ajg0702.parkour.game.PkPlayer;
+import us.ajg0702.parkour.storage.PlayerData;
 import us.ajg0702.parkour.top.TopEntry;
 import us.ajg0702.parkour.top.TopManager;
 
 /**
- * This class will be registered through the register-method in the 
- * plugins onEnable-method.
+ * PlaceholderAPI expansion. Every placeholder is answered from memory; it never blocks on the database.
  */
 public class Placeholders extends PlaceholderExpansion {
 
     private final Main plugin;
 
-    /**
-     * Since we register the expansion inside our own plugin, we
-     * can simply use this method here to get an instance of our
-     * plugin.
-     *
-     * @param plugin
-     *        The instance of our plugin.
-     */
-    public Placeholders(Main plugin){
+    public Placeholders(Main plugin) {
         this.plugin = plugin;
     }
 
-    /**
-     * Because this is an internal class,
-     * you must override this method to let PlaceholderAPI know to not unregister your expansion class when
-     * PlaceholderAPI is reloaded
-     *
-     * @return true to persist through reloads
-     */
     @Override
-    public boolean persist(){
+    public boolean persist() {
         return true;
     }
 
-    /**
-     * Because this is a internal class, this check is not needed
-     * and we can simply return {@code true}
-     *
-     * @return Always true since it's an internal class.
-     */
     @Override
-    public boolean canRegister(){
+    public boolean canRegister() {
         return true;
     }
 
-    /**
-     * The name of the person who created this expansion should go here.
-     * <br>For convenience do we return the author from the plugin.yml
-     * 
-     * @return The name of the author as a String.
-     */
     @Override
-    public String getAuthor(){
-        return plugin.getDescription().getAuthors().toString();
+    public String getAuthor() {
+        return String.join(", ", plugin.getPluginMeta().getAuthors());
     }
 
-    /**
-     * The placeholder identifier should go here.
-     * <br>This is what tells PlaceholderAPI to call our onRequest 
-     * method to obtain a value if a placeholder starts with our 
-     * identifier.
-     * <br>This must be unique and can not contain % or _
-     *
-     * @return The identifier in {@code %<identifier>_<value>%} as String.
-     */
     @Override
-    public String getIdentifier(){
+    public String getIdentifier() {
         return "ajpk";
     }
 
-    /**
-     * This is the version of the expansion.
-     * <br>You don't have to use numbers, since it is set as a String.
-     *
-     * For convenience do we return the version from the plugin.yml
-     *
-     * @return The version as a String.
-     */
     @Override
-    public String getVersion(){
-        return plugin.getDescription().getVersion();
+    public String getVersion() {
+        return plugin.getPluginMeta().getVersion();
     }
 
-
-
-    /**
-     * This is the method called when a placeholder with our identifier 
-     * is found and needs a value.
-     * <br>We specify the value identifier in this method.
-     * <br>Since version 2.9.1 can you use OfflinePlayers in your requests.
-     *
-     * @param  player
-     *         A Player.
-     * @param  identifier
-     *         A String containing the identifier/value.
-     *
-     * @return possibly-null String of the requested identifier.
-     */
     @Override
-    public String onPlaceholderRequest(Player player, String identifier){
-    	identifier = identifier.replaceAll("_nocache", "");
+    public @Nullable String onRequest(@Nullable OfflinePlayer player, String identifier) {
+        identifier = identifier.replace("_nocache", "");
 
-		if(identifier.matches("stats_top_name_[1-9][0-9]*$")) {
-			int number = Integer.parseInt(identifier.split("stats_top_name_")[1]);
-			TopEntry pos = TopManager.getInstance().getTop(number, null);
-
-			if(pos.getName().equalsIgnoreCase("--")) {
-				return plugin.msgs.get("placeholders.stats.no-data", player);
-			}
-
-			return pos.getName();
-		}
-		if(identifier.matches("stats_top_name_[1-9][0-9]*_.+$")) {
-			int number = Integer.parseInt(identifier.split("_")[3]);
-			String area = identifier.split("_")[4];
-			TopEntry pos = TopManager.getInstance().getTop(number, area);
-
-			if(pos.getName().equalsIgnoreCase("--")) {
-				return plugin.msgs.get("placeholders.stats.no-data", player);
-			}
-
-			return pos.getName();
-		}
-
-
-
-
-		if(identifier.matches("stats_top_score_[1-9][0-9]*$")) {
-			int number = Integer.parseInt(identifier.split("stats_top_score_")[1]);
-			TopEntry pos = TopManager.getInstance().getTop(number, null);
-
-			if(pos.getName().equalsIgnoreCase("--")) {
-				return plugin.msgs.get("placeholders.stats.no-data", player);
-			}
-
-			return pos.getScore()+"";
-		}
-		if(identifier.matches("stats_top_score_[1-9][0-9]*_.+$")) {
-			int number = Integer.parseInt(identifier.split("_")[3]);
-			String area = identifier.split("_")[4];
-			TopEntry pos = TopManager.getInstance().getTop(number, area);
-
-			if(pos.getName().equalsIgnoreCase("--")) {
-				return plugin.msgs.get("placeholders.stats.no-data", player);
-			}
-
-			return pos.getScore()+"";
-		}
-
-
-
-		if(identifier.matches("stats_gamesplayed")) {
-			return plugin.scores.getGamesPlayed(player.getUniqueId())+"";
-		}
-
-
-
-
-		if(identifier.matches("stats_top_time_[1-9][0-9]*$")) {
-			int number = Integer.parseInt(identifier.split("stats_top_time_")[1]);
-			TopEntry pos = TopManager.getInstance().getTop(number, null);
-
-			int time = pos.getTime();
-
-			if(pos.getName().equalsIgnoreCase("--") || pos.getTime() < 0) {
-				return plugin.msgs.get("placeholders.stats.no-data", player);
-			}
-
-			int min = time / 60;
-			int sec = time % 60;
-
-			return plugin.msgs.get("placeholders.stats.time-format", player)
-					.replaceAll("\\{m}", min+"")
-					.replaceAll("\\{s}", sec+"");
-		}
-        if(identifier.matches("stats_top_time_[1-9][0-9]*_.+$")) {
-        	int number = Integer.parseInt(identifier.split("_")[3]);
-        	String area = identifier.split("_")[4];
-			TopEntry pos = TopManager.getInstance().getTop(number, area);
-
-			int time = pos.getTime();
-
-			if(pos.getName().equalsIgnoreCase("--") || pos.getTime() < 0) {
-				return plugin.msgs.get("placeholders.stats.no-data", player);
-			}
-
-			int min = time / 60;
-			int sec = time % 60;
-
-            return plugin.msgs.get("placeholders.stats.time-format", player)
-            		.replaceAll("\\{m}", min+"")
-            		.replaceAll("\\{s}", sec+"");
+        if(identifier.startsWith("stats_top_")) {
+            return top(player, identifier.substring("stats_top_".length()));
         }
 
+        switch(identifier) {
+            case "stats_gamesplayed" -> {
+                PlayerData d = data(player);
+                return Integer.toString(d == null ? 0 : d.gamesPlayed());
+            }
+            case "current" -> {
+                if(player == null) return "0";
+                PkPlayer p = plugin.man.getPlayer(player.getUniqueId());
+                return p != null ? Integer.toString(p.getScore()) : plugin.msgs.plain("placeholders.current.no-data");
+            }
+            case "jumping" -> {
+                return Integer.toString(plugin.man.getTotalPlayers());
+            }
+            case "stats_highscore" -> {
+                PlayerData d = data(player);
+                return Integer.toString(d == null ? 0 : d.highScore(null));
+            }
+            default -> {}
+        }
 
-
-		if(identifier.equals("current")) {
-			if(player == null) return "0";
-			PkPlayer p = plugin.man.getPlayer(player);
-			if(p != null) {
-				return p.getScore()+"";
-			} else {
-				return plugin.msgs.get("placeholders.current.no-data");
-			}
-		}
-
-		if(identifier.equals("jumping")) {
-			return plugin.man.getTotalPlayers()+"";
-		}
-		if(identifier.equals("jumping_.+")) {
-			String areaRaw = identifier.split("_")[1];
-			PkArea area = plugin.man.getArea(areaRaw);
-			if(area == null) {
-				return "!";
-			}
-			return plugin.man.getPlayerCounts(area)+"";
-		}
-
-
-		if(identifier.equals("stats_highscore")) {
-			if(player == null) {
-				return "0";
-			}
-			return TopManager.getInstance().getHighScore(player, null)+"";
-		}
-
-		if(identifier.matches("stats_highscore_.+$")) {
-			if(player == null) {
-				return "0";
-			}
-
-			String area = identifier.split("_")[2];
-			return plugin.scores.getHighScore(player.getUniqueId(), area)+"";
-		}
-
-
-		return null;
+        if(identifier.startsWith("jumping_")) {
+            PkArea area = plugin.man.getArea(identifier.substring("jumping_".length()));
+            return area == null ? "!" : Integer.toString(plugin.man.getPlayerCounts(area));
+        }
+        if(identifier.startsWith("stats_highscore_")) {
+            PlayerData d = data(player);
+            return Integer.toString(d == null ? 0 : d.highScore(identifier.substring("stats_highscore_".length())));
+        }
+        return null;
     }
 
+    /** Handles {@code <name|score|time>_<position>[_<area>]}. */
+    private @Nullable String top(@Nullable OfflinePlayer player, String rest) {
+        String[] parts = rest.split("_", 3);
+        if(parts.length < 2) return null;
+        int number;
+        try {
+            number = Integer.parseInt(parts[1]);
+        } catch(NumberFormatException e) {
+            return null;
+        }
+        if(number < 1) return null;
+        String area = parts.length == 3 ? parts[2] : null;
+        TopEntry pos = TopManager.getInstance().getTop(number, area);
+        String noData = plugin.msgs.plain("placeholders.stats.no-data", player);
 
+        return switch(parts[0]) {
+            case "name" -> pos.isEmpty() ? noData : pos.name();
+            case "score" -> pos.isEmpty() ? noData : Integer.toString(pos.score());
+            case "time" -> pos.isEmpty() || pos.time() < 0
+                    ? noData
+                    : plugin.msgs.plain("placeholders.stats.time-format", player,
+                            Messages.tag("m", pos.time() / 60), Messages.tag("s", pos.time() % 60));
+            default -> null;
+        };
+    }
+
+    private @Nullable PlayerData data(@Nullable OfflinePlayer player) {
+        if(player == null) return null;
+        PlayerData d = plugin.scores.getCached(player.getUniqueId());
+        if(d == null) {
+            plugin.scores.load(player.getUniqueId(), null);
+        }
+        return d;
+    }
 }

@@ -1,15 +1,13 @@
 package us.ajg0702.parkour.top;
 
-public class TopEntry {
-    private final int position;
-    private final String name;
-    private final int score;
-    private final int time;
-    public TopEntry(int position, String name, int score, int time) {
-        this.position = position;
-        this.name = name;
-        this.score = score;
-        this.time = time;
+public record TopEntry(int position, String name, int score, int time) {
+
+    public static TopEntry empty(int position) {
+        return new TopEntry(position, "--", -1, -1);
+    }
+
+    public boolean isEmpty() {
+        return name.equals("--");
     }
 
     public int getPosition() {
@@ -27,5 +25,4 @@ public class TopEntry {
     public int getTime() {
         return time;
     }
-
 }
